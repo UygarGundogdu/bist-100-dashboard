@@ -542,10 +542,9 @@ def render_sidebar():
         selected_subset = st.multiselect(
             "Filter stocks (empty = all)",
             options=all_stocks,
-            default=[],
+            default=["THYAO", "EREGL", "AKBNK", "GARAN", "TUPRS"], # Loads just 5 stocks initially
             help="Select specific stocks to show in Page 1, or leave empty for all.",
         )
-
         st.markdown("---")
         st.caption(f"Data cached for 1 hour • Last refresh: {datetime.now().strftime('%H:%M')}")
 
