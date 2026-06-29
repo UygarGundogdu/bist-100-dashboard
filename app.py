@@ -711,9 +711,9 @@ def render_page1(params):
     styled = (
         display_df[show_cols]
         .style
-        .applymap(color_signal, subset=["Signal"])
-        .applymap(color_score,  subset=["Score"])
-        .applymap(color_chg,    subset=["Change%"])
+        .map(color_signal, subset=["Signal"])
+        .map(color_score,  subset=["Score"])
+        .map(color_chg,    subset=["Change%"])
         .format({"Price": "{:.2f}", "Change%": "{:+.2f}%"}, na_rep="—")
     )
     st.dataframe(styled, use_container_width=True, height=500)
