@@ -168,65 +168,26 @@ SIGNAL_EMOJI = {
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_data(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """
-    Download OHLCV from Yahoo Finance with caching (1h TTL).
-    Retries once on transient failures (Yahoo throttling is common when
-    looping through many tickers back-to-back).
-    """
-    last_err = None
-    for attempt in range(2):
-        try:
-            df = yf.download(
-                f"{ticker}.IS",
-                period=period,
-                interval=interval,
-                auto_adjust=True,
-                progress=False,
-                threads=False,   # avoids intermittent empty-frame race conditions
-            )
-
-            if df is None or df.empty:
-                last_err = "empty_response"
-                time.sleep(1.2)
-                continue
-
-            # yfinance sometimes returns a MultiIndex even for a single ticker
-            # (column level can be either (field, ticker) or (ticker, field)
-            # depending on version) — handle both orderings safely.
-            if isinstance(df.columns, pd.MultiIndex):
-                lvl0 = df.columns.get_level_values(0)
-                lvl1 = df.columns.get_level_values(1)
-                if ticker in lvl0.astype(str).values or f"{ticker}.IS" in lvl0.astype(str).values:
-                    df.columns = lvl1  # (ticker, field) -> keep field
-                else:
-                    df.columns = lvl0  # (field, ticker) -> keep field
-
-            df.columns = [str(c).lower() for c in df.columns]
-
-            required = {"open", "high", "low", "close"}
-            if not required.issubset(set(df.columns)):
-                last_err = f"missing_columns:{set(df.columns)}"
-                time.sleep(1.2)
-                continue
-
-            df.index = pd.to_datetime(df.index)
-            df = df.dropna(subset=["close"])
-
-            if df.empty:
-                last_err = "all_nan_after_clean"
-                time.sleep(1.2)
-                continue
-
-            return df
-
-        except Exception as e:
-            last_err = str(e)
-            time.sleep(1.2)
-            continue
-
-    # Both attempts failed — stash the reason so the UI can show it
-    st.session_state.setdefault("_fetch_errors", {})[ticker] = last_err
-    return pd.DataFrame()
+    """Download OHLCV from Yahoo Finance with caching (1h TTL)."""
+    try:
+        df = yf.download(
+            f"{ticker}.IS",
+            period=period,
+            interval=interval,
+            auto_adjust=True,
+            progress=False,
+        )
+        if df.empty:
+            return pd.DataFrame()
+        # Flatten multi-index if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df.columns = [c.lower() for c in df.columns]
+        df.index = pd.to_datetime(df.index)
+        df = df.dropna(subset=["close"])
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 def compute_indicators(df: pd.DataFrame) -> dict:
@@ -792,17 +753,7 @@ def render_page2(params):
         df = fetch_data(ticker, params["period"], params["interval"])
 
     if df.empty:
-        err = st.session_state.get("_fetch_errors", {}).get(ticker, "unknown")
-        st.error(
-            f"Couldn't load data for **{ticker}.IS** after 2 attempts.\n\n"
-            f"Reason: `{err}`\n\n"
-            f"This is usually temporary Yahoo Finance throttling — try **Refresh Data** above. "
-            f"If it persists for a specific stock across many retries, the ticker symbol "
-            f"or suffix may need checking."
-        )
-        if st.button("🔁 Retry now", key=f"retry_{ticker}"):
-            fetch_data.clear()
-            st.rerun()
+        st.error(f"No data for {ticker}. It may be delisted or temporarily unavailable.")
         return
 
     # Compute indicators with custom params
