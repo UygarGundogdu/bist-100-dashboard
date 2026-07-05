@@ -596,81 +596,80 @@ def sidebar() -> dict:
 
         # -- Page 1 market selections -------------------------------------
         # Behaviour:
-        #   - Category checkbox = select/deselect ALL items in that group
-        #   - Arrow button      = collapse/expand the individual item list
-        #   - Individual items  = override the group when group is checked
-        #   - Default           = all checked, items collapsed
+        #   Category checkbox  -> select / deselect ALL items in group
+        #   Arrow button       -> collapse / expand individual item list
+        #   Individual items   -> override independently when expanded
+        #   Default            -> all selected, items collapsed
         st.markdown('<div class="ss">Page 1 — Market Selection</div>',
                     unsafe_allow_html=True)
 
+        def init_group(key, items, default_checked):
+            """Seed session state once per group (survives reruns)."""
+            if f"exp_{key}" not in st.session_state:
+                st.session_state[f"exp_{key}"] = False
+            for name in items:
+                if f"item_{key}_{name}" not in st.session_state:
+                    st.session_state[f"item_{key}_{name}"] = default_checked
+
         def asset_group(label, key, items, default_checked=True):
-            """
-            Renders one group:
-              [checkbox] Label  [v / >]
-              (collapsed by default)
-                  [checkbox] item 1
-                  [checkbox] item 2
-                  ...
-            Returns list of selected item names.
-            """
-            exp_key  = f"exp_{key}"
-            all_key  = f"all_{key}"
+            init_group(key, items, default_checked)
 
-            # Initialise session state on first run
-            if exp_key not in st.session_state:
-                st.session_state[exp_key] = False        # collapsed by default
-            if all_key not in st.session_state:
-                st.session_state[all_key] = default_checked
+            expanded = st.session_state[f"exp_{key}"]
 
-            # Header row: checkbox + label + arrow button
-            col_chk, col_lbl, col_arr = st.columns([0.08, 0.74, 0.18])
-            with col_chk:
-                new_all = st.checkbox("", value=st.session_state[all_key],
-                                      key=f"_hdr_{key}",
-                                      label_visibility="collapsed")
-                # If the master toggle changed, update all individual items
-                if new_all != st.session_state[all_key]:
-                    st.session_state[all_key] = new_all
-                    for name in items:
-                        st.session_state[f"item_{key}_{name}"] = new_all
-                    st.rerun()
-            with col_lbl:
+            # ---- header row: arrow | checkbox | label ----------------------
+            c_arr, c_chk, c_lbl = st.columns([0.12, 0.12, 0.76])
+
+            # Arrow toggles expand/collapse
+            with c_arr:
+                arrow = "▼" if expanded else "▶"
+                if st.button(arrow, key=f"_arr_{key}"):
+                    st.session_state[f"exp_{key}"] = not expanded
+
+            # Master checkbox: on_change updates all item states immediately
+            def on_master_change(k=key, it=items):
+                new_val = st.session_state[f"_hdr_{k}"]
+                for n in it:
+                    st.session_state[f"item_{k}_{n}"] = new_val
+
+            # Derive current master value from item states
+            any_on = any(st.session_state[f"item_{key}_{n}"] for n in items)
+            with c_chk:
+                st.checkbox("", value=any_on, key=f"_hdr_{key}",
+                            on_change=on_master_change,
+                            label_visibility="collapsed")
+            with c_lbl:
                 st.markdown(f"**{label}**")
-            with col_arr:
-                arrow = "▼" if st.session_state[exp_key] else "▶"
-                if st.button(arrow, key=f"_arr_{key}", use_container_width=False):
-                    st.session_state[exp_key] = not st.session_state[exp_key]
-                    st.rerun()
 
-            # Item checkboxes (only when expanded)
+            # ---- item checkboxes (only when expanded) ----------------------
             selected = []
-            if st.session_state[exp_key]:
-                _, item_col = st.columns([0.08, 0.92])
-                with item_col:
+            if st.session_state[f"exp_{key}"]:
+                _, col = st.columns([0.12, 0.88])
+                with col:
                     for name in items:
-                        item_key = f"item_{key}_{name}"
-                        if item_key not in st.session_state:
-                            st.session_state[item_key] = st.session_state[all_key]
-                        checked = st.checkbox(name, value=st.session_state[item_key],
-                                              key=f"_chk_{key}_{name}")
-                        st.session_state[item_key] = checked
+                        def on_item_change(k=key, n=name):
+                            # If any item unchecked while master was on,
+                            # we leave master alone — it reflects any_on above
+                            pass
+                        checked = st.checkbox(
+                            name,
+                            value=st.session_state[f"item_{key}_{name}"],
+                            key=f"_chk_{key}_{name}",
+                        )
+                        st.session_state[f"item_{key}_{name}"] = checked
                         if checked:
                             selected.append(name)
             else:
-                # Not expanded — use stored state for each item
+                # Collapsed — read from stored state
                 for name in items:
-                    item_key = f"item_{key}_{name}"
-                    if item_key not in st.session_state:
-                        st.session_state[item_key] = st.session_state[all_key]
-                    if st.session_state[item_key]:
+                    if st.session_state[f"item_{key}_{name}"]:
                         selected.append(name)
 
             return selected
 
-        sel_idx = asset_group("Indices",     "idx", list(INDICES.keys()),     default_checked=True)
-        sel_com = asset_group("Commodities", "com", list(COMMODITIES.keys()), default_checked=True)
-        sel_fx  = asset_group("Forex",       "fx",  list(FOREX.keys()),       default_checked=True)
-        sel_cr  = asset_group("Crypto",      "cr",  list(CRYPTO.keys()),      default_checked=True)
+        sel_idx = asset_group("Indices",     "idx", list(INDICES.keys()),     True)
+        sel_com = asset_group("Commodities", "com", list(COMMODITIES.keys()), True)
+        sel_fx  = asset_group("Forex",       "fx",  list(FOREX.keys()),       True)
+        sel_cr  = asset_group("Crypto",      "cr",  list(CRYPTO.keys()),      True)
 
         st.markdown("---")
         if st.button("🗑️ Clear cache", use_container_width=True):
