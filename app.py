@@ -595,43 +595,82 @@ def sidebar() -> dict:
             willr_len = st.slider("Williams %R",       5, 30, 14)
 
         # -- Page 1 market selections -------------------------------------
-        # Two-level flat list: bold category checkbox + indented item checkboxes
+        # Behaviour:
+        #   - Category checkbox = select/deselect ALL items in that group
+        #   - Arrow button      = collapse/expand the individual item list
+        #   - Individual items  = override the group when group is checked
+        #   - Default           = all checked, items collapsed
         st.markdown('<div class="ss">Page 1 — Market Selection</div>',
                     unsafe_allow_html=True)
 
-        # Indent helper: tiny left column creates the visual indent
-        def indented(label, key, default):
-            _, col = st.columns([0.06, 0.94])
-            with col:
-                return st.checkbox(label, value=default, key=key)
+        def asset_group(label, key, items, default_checked=True):
+            """
+            Renders one group:
+              [checkbox] Label  [v / >]
+              (collapsed by default)
+                  [checkbox] item 1
+                  [checkbox] item 2
+                  ...
+            Returns list of selected item names.
+            """
+            exp_key  = f"exp_{key}"
+            all_key  = f"all_{key}"
 
-        # -- Indices ----------------------------------------------------------
-        all_idx = st.checkbox("Indices", value=True, key="all_idx")
-        sel_idx = []
-        for name in INDICES:
-            if indented(name, f"idx_{name}", all_idx):
-                sel_idx.append(name)
+            # Initialise session state on first run
+            if exp_key not in st.session_state:
+                st.session_state[exp_key] = False        # collapsed by default
+            if all_key not in st.session_state:
+                st.session_state[all_key] = default_checked
 
-        # -- Commodities ------------------------------------------------------
-        all_com = st.checkbox("Commodities", value=True, key="all_com")
-        sel_com = []
-        for name in COMMODITIES:
-            if indented(name, f"com_{name}", all_com):
-                sel_com.append(name)
+            # Header row: checkbox + label + arrow button
+            col_chk, col_lbl, col_arr = st.columns([0.08, 0.74, 0.18])
+            with col_chk:
+                new_all = st.checkbox("", value=st.session_state[all_key],
+                                      key=f"_hdr_{key}",
+                                      label_visibility="collapsed")
+                # If the master toggle changed, update all individual items
+                if new_all != st.session_state[all_key]:
+                    st.session_state[all_key] = new_all
+                    for name in items:
+                        st.session_state[f"item_{key}_{name}"] = new_all
+                    st.rerun()
+            with col_lbl:
+                st.markdown(f"**{label}**")
+            with col_arr:
+                arrow = "▼" if st.session_state[exp_key] else "▶"
+                if st.button(arrow, key=f"_arr_{key}", use_container_width=False):
+                    st.session_state[exp_key] = not st.session_state[exp_key]
+                    st.rerun()
 
-        # -- Forex ------------------------------------------------------------
-        all_fx = st.checkbox("Forex", value=False, key="all_fx")
-        sel_fx = []
-        for name in FOREX:
-            if indented(name, f"fx_{name}", all_fx):
-                sel_fx.append(name)
+            # Item checkboxes (only when expanded)
+            selected = []
+            if st.session_state[exp_key]:
+                _, item_col = st.columns([0.08, 0.92])
+                with item_col:
+                    for name in items:
+                        item_key = f"item_{key}_{name}"
+                        if item_key not in st.session_state:
+                            st.session_state[item_key] = st.session_state[all_key]
+                        checked = st.checkbox(name, value=st.session_state[item_key],
+                                              key=f"_chk_{key}_{name}")
+                        st.session_state[item_key] = checked
+                        if checked:
+                            selected.append(name)
+            else:
+                # Not expanded — use stored state for each item
+                for name in items:
+                    item_key = f"item_{key}_{name}"
+                    if item_key not in st.session_state:
+                        st.session_state[item_key] = st.session_state[all_key]
+                    if st.session_state[item_key]:
+                        selected.append(name)
 
-        # -- Crypto -----------------------------------------------------------
-        all_cr = st.checkbox("Crypto", value=False, key="all_cr")
-        sel_cr = []
-        for name in CRYPTO:
-            if indented(name, f"cr_{name}", all_cr):
-                sel_cr.append(name)
+            return selected
+
+        sel_idx = asset_group("Indices",     "idx", list(INDICES.keys()),     default_checked=True)
+        sel_com = asset_group("Commodities", "com", list(COMMODITIES.keys()), default_checked=True)
+        sel_fx  = asset_group("Forex",       "fx",  list(FOREX.keys()),       default_checked=True)
+        sel_cr  = asset_group("Crypto",      "cr",  list(CRYPTO.keys()),      default_checked=True)
 
         st.markdown("---")
         if st.button("🗑️ Clear cache", use_container_width=True):
