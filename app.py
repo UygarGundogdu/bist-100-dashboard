@@ -391,11 +391,13 @@ def _label(t):
     return "Hold"
 
 
-def compute_signal(df: pd.DataFrame, p: dict) -> dict:
+def compute_signal(df: pd.DataFrame, p: dict, full_series: bool = False) -> dict:
     empty = {"signal":"N/A","score":0,"details":{},"ind_series":{}}
     if len(df) < 35: return empty
     try:
-        d = df.tail(200).copy()   # 200 rows: enough for slow MACD + buffer
+        # Screener only needs last signal value -> tail(200) saves memory/time.
+        # Chart page needs full history -> use complete df when full_series=True.
+        d = df.copy() if full_series else df.tail(200).copy()
         mf, ms, mg = p["macd_fast"], p["macd_slow"], p["macd_sig"]
         rl, ml, cl = p["rsi_len"], p["mom_len"], p["cci_len"]
         sk, sd, wl = p["stoch_k"], p["stoch_d"], p["willr_len"]
@@ -963,7 +965,7 @@ def page3(p):
         st.error(f"No data for **{full_ticker}**. Try Refresh or check the ticker.")
         return
 
-    sig = compute_signal(df, p)
+    sig = compute_signal(df, p, full_series=True)
     price   = float(df["close"].iloc[-1])
     chg_pct = float((df["close"].iloc[-1]/df["close"].iloc[-2]-1)*100) if len(df)>1 else 0.
     chg_col = "#26A69A" if chg_pct >= 0 else "#EF5350"
