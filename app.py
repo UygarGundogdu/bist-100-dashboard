@@ -595,46 +595,53 @@ def sidebar() -> dict:
             willr_len = st.slider("Williams %R",       5, 30, 14)
 
         # ── Page 1 market selections ─────────────────────────────────────────
+        # Pattern: one expander per class; first row = "Select all" toggle,
+        # then one checkbox per item (grouped by sub-category where relevant).
         st.markdown('<div class="ss">Page 1 — Market Selection</div>',
                     unsafe_allow_html=True)
 
-        # Global toggle per class
-        c1, c2, c3, c4 = st.columns(4)
-        all_idx = c1.checkbox("IDX", True,  help="Indices")
-        all_com = c2.checkbox("COM", True,  help="Commodities")
-        all_fx  = c3.checkbox("FX",  False, help="Forex")
-        all_cr  = c4.checkbox("CR",  False, help="Crypto")
-
-        with st.expander("🌍 Indices", expanded=all_idx):
-            # Group by region
+        # ── Indices ───────────────────────────────────────────────────────────
+        with st.expander("🌍 Indices", expanded=True):
+            all_idx = st.checkbox("Select all indices", value=True, key="all_idx")
+            st.markdown("---")
             regions = {}
             for name, m in INDICES.items():
                 regions.setdefault(m["region"], []).append(name)
             sel_idx = []
             for reg, names in regions.items():
-                st.markdown(f"**{reg}**")
+                st.caption(reg)
                 for name in names:
+                    default = all_idx if all_idx else st.session_state.get(f"idx_{name}", True)
                     if st.checkbox(name, value=all_idx, key=f"idx_{name}"):
                         sel_idx.append(name)
 
+        # ── Commodities ───────────────────────────────────────────────────────
         with st.expander("🏅 Commodities", expanded=False):
+            all_com = st.checkbox("Select all commodities", value=True, key="all_com")
+            st.markdown("---")
             subs = {}
             for name, m in COMMODITIES.items():
                 subs.setdefault(m["region"], []).append(name)
             sel_com = []
             for sub, names in subs.items():
-                st.markdown(f"**{sub}**")
+                st.caption(sub)
                 for name in names:
                     if st.checkbox(name, value=all_com, key=f"com_{name}"):
                         sel_com.append(name)
 
+        # ── Forex ─────────────────────────────────────────────────────────────
         with st.expander("💱 Forex", expanded=False):
+            all_fx = st.checkbox("Select all pairs", value=False, key="all_fx")
+            st.markdown("---")
             sel_fx = []
             for name in FOREX:
                 if st.checkbox(name, value=all_fx, key=f"fx_{name}"):
                     sel_fx.append(name)
 
+        # ── Crypto ────────────────────────────────────────────────────────────
         with st.expander("₿ Crypto", expanded=False):
+            all_cr = st.checkbox("Select all crypto", value=False, key="all_cr")
+            st.markdown("---")
             sel_cr = []
             for name in CRYPTO:
                 if st.checkbox(name, value=all_cr, key=f"cr_{name}"):
