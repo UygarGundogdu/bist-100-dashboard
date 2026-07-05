@@ -594,58 +594,44 @@ def sidebar() -> dict:
             stoch_d   = st.slider("Stochastic %D",    2, 10,  3)
             willr_len = st.slider("Williams %R",       5, 30, 14)
 
-        # ── Page 1 market selections ─────────────────────────────────────────
-        # Pattern: one expander per class; first row = "Select all" toggle,
-        # then one checkbox per item (grouped by sub-category where relevant).
+        # -- Page 1 market selections -------------------------------------
+        # Two-level flat list: bold category checkbox + indented item checkboxes
         st.markdown('<div class="ss">Page 1 — Market Selection</div>',
                     unsafe_allow_html=True)
 
-        # ── Indices ───────────────────────────────────────────────────────────
-        with st.expander("🌍 Indices", expanded=True):
-            all_idx = st.checkbox("Select all indices", value=True, key="all_idx")
-            st.markdown("---")
-            regions = {}
-            for name, m in INDICES.items():
-                regions.setdefault(m["region"], []).append(name)
-            sel_idx = []
-            for reg, names in regions.items():
-                st.caption(reg)
-                for name in names:
-                    default = all_idx if all_idx else st.session_state.get(f"idx_{name}", True)
-                    if st.checkbox(name, value=all_idx, key=f"idx_{name}"):
-                        sel_idx.append(name)
+        # Indent helper: tiny left column creates the visual indent
+        def indented(label, key, default):
+            _, col = st.columns([0.06, 0.94])
+            with col:
+                return st.checkbox(label, value=default, key=key)
 
-        # ── Commodities ───────────────────────────────────────────────────────
-        with st.expander("🏅 Commodities", expanded=False):
-            all_com = st.checkbox("Select all commodities", value=True, key="all_com")
-            st.markdown("---")
-            subs = {}
-            for name, m in COMMODITIES.items():
-                subs.setdefault(m["region"], []).append(name)
-            sel_com = []
-            for sub, names in subs.items():
-                st.caption(sub)
-                for name in names:
-                    if st.checkbox(name, value=all_com, key=f"com_{name}"):
-                        sel_com.append(name)
+        # -- Indices ----------------------------------------------------------
+        all_idx = st.checkbox("Indices", value=True, key="all_idx")
+        sel_idx = []
+        for name in INDICES:
+            if indented(name, f"idx_{name}", all_idx):
+                sel_idx.append(name)
 
-        # ── Forex ─────────────────────────────────────────────────────────────
-        with st.expander("💱 Forex", expanded=False):
-            all_fx = st.checkbox("Select all pairs", value=False, key="all_fx")
-            st.markdown("---")
-            sel_fx = []
-            for name in FOREX:
-                if st.checkbox(name, value=all_fx, key=f"fx_{name}"):
-                    sel_fx.append(name)
+        # -- Commodities ------------------------------------------------------
+        all_com = st.checkbox("Commodities", value=True, key="all_com")
+        sel_com = []
+        for name in COMMODITIES:
+            if indented(name, f"com_{name}", all_com):
+                sel_com.append(name)
 
-        # ── Crypto ────────────────────────────────────────────────────────────
-        with st.expander("₿ Crypto", expanded=False):
-            all_cr = st.checkbox("Select all crypto", value=False, key="all_cr")
-            st.markdown("---")
-            sel_cr = []
-            for name in CRYPTO:
-                if st.checkbox(name, value=all_cr, key=f"cr_{name}"):
-                    sel_cr.append(name)
+        # -- Forex ------------------------------------------------------------
+        all_fx = st.checkbox("Forex", value=False, key="all_fx")
+        sel_fx = []
+        for name in FOREX:
+            if indented(name, f"fx_{name}", all_fx):
+                sel_fx.append(name)
+
+        # -- Crypto -----------------------------------------------------------
+        all_cr = st.checkbox("Crypto", value=False, key="all_cr")
+        sel_cr = []
+        for name in CRYPTO:
+            if indented(name, f"cr_{name}", all_cr):
+                sel_cr.append(name)
 
         st.markdown("---")
         if st.button("🗑️ Clear cache", use_container_width=True):
