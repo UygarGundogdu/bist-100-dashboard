@@ -12,6 +12,7 @@ Run: streamlit run app.py
 """
 
 import io, time
+from scipy.signal import find_peaks
 import streamlit as st
 import pandas as pd
 import pandas_ta as ta
@@ -391,7 +392,199 @@ def _label(t):
     return "Hold"
 
 
-def compute_signal(df: pd.DataFrame, p: dict, full_series: bool = False) -> dict:
+# =============================================================================
+# DIVERGENCE DETECTION
+# =============================================================================
+# Detect divergences on RSI and MACD histogram only (most reliable pair).
+# Returns the most recent confirmed divergence within `lookback` bars.
+#
+# Parameters tuned by timeframe:
+#   order      : bars each side a swing must be the extreme (5 = daily, 3 = hourly)
+#   min_bars   : minimum bar gap between two swings (10 = daily, 5 = hourly)
+#   min_rsi_diff  : minimum RSI point difference to count (3 pts)
+#   min_macd_diff : minimum MACD histogram difference to count (relative, 10%)
+
+DIV_LABELS = {
+    "bullish":        ("🟢 Bullish",       "#00C853"),
+    "bearish":        ("🔴 Bearish",       "#D50000"),
+    "hidden_bullish": ("🟩 Hid.Bullish",   "#26A69A"),
+    "hidden_bearish": ("🟧 Hid.Bearish",   "#FF6D00"),
+    None:             ("—",                "#555555"),
+}
+
+STRENGTH_LABEL = {0: "", 1: "●", 2: "●●", 3: "●●●"}
+
+
+def _find_swings(series: pd.Series, order: int):
+    """
+    Return (swing_highs, swing_lows) using scipy find_peaks.
+    find_peaks is more robust than argrelextrema for noisy real-market data
+    and avoids false positives on flat segments.
+    prominence controls minimum height above surrounding baseline.
+    """
+    s   = series.dropna()
+    arr = s.values
+    if len(arr) < order * 2 + 1:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    # Highs
+    hi_pos, _ = find_peaks(arr,  distance=order, prominence=0)
+    # Lows  (invert the series to find troughs)
+    lo_pos, _ = find_peaks(-arr, distance=order, prominence=0)
+    return (pd.Series(arr[hi_pos], index=s.index[hi_pos]),
+            pd.Series(arr[lo_pos], index=s.index[lo_pos]))
+
+
+def _bar_gap(series: pd.Series, idx1, idx2) -> int:
+    """Integer bar distance between two index labels."""
+    try:
+        return abs(series.index.get_loc(idx2) - series.index.get_loc(idx1))
+    except Exception:
+        return 0
+
+
+def _strength(diff: float, thr: float) -> int:
+    if diff >= thr * 4: return 3
+    if diff >= thr * 2: return 2
+    return 1
+
+
+def _check_pair(p_swings, i_swings, price: pd.Series, ind: pd.Series,
+                min_bars: int, min_diff: float,
+                bullish_direction: bool) -> dict:
+    """
+    Check last two swing points for classic or hidden divergence.
+    bullish_direction=True  -> look at lows (bullish / hidden bearish)
+    bullish_direction=False -> look at highs (bearish / hidden bullish)
+    Returns a result dict or empty dict.
+    """
+    if len(p_swings) < 2 or len(i_swings) < 2:
+        return {}
+
+    p1_idx, p2_idx = p_swings.index[-2], p_swings.index[-1]
+    p1,     p2     = float(p_swings.iloc[-2]), float(p_swings.iloc[-1])
+    i1_idx, i2_idx = i_swings.index[-2], i_swings.index[-1]
+    i1,     i2     = float(i_swings.iloc[-2]), float(i_swings.iloc[-1])
+
+    if _bar_gap(price, p1_idx, p2_idx) < min_bars:
+        return {}
+    if abs(i1 - i2) < min_diff:
+        return {}
+
+    result = {}
+    if bullish_direction:
+        # Classic bullish: price lower low, indicator higher low
+        if p2 < p1 and i2 > i1:
+            result = {"type": "bullish",
+                      "strength": _strength(i2 - i1, min_diff),
+                      "p_x": [p1_idx, p2_idx], "p_y": [p1, p2],
+                      "i_x": [i1_idx, i2_idx], "i_y": [i1, i2]}
+        # Hidden bullish: price higher low (trend up), indicator lower low
+        elif p2 > p1 and i2 < i1:
+            result = {"type": "hidden_bullish",
+                      "strength": _strength(i1 - i2, min_diff),
+                      "p_x": [p1_idx, p2_idx], "p_y": [p1, p2],
+                      "i_x": [i1_idx, i2_idx], "i_y": [i1, i2]}
+    else:
+        # Classic bearish: price higher high, indicator lower high
+        if p2 > p1 and i2 < i1:
+            result = {"type": "bearish",
+                      "strength": _strength(i1 - i2, min_diff),
+                      "p_x": [p1_idx, p2_idx], "p_y": [p1, p2],
+                      "i_x": [i1_idx, i2_idx], "i_y": [i1, i2]}
+        # Hidden bearish: price lower high (trend down), indicator higher high
+        elif p2 < p1 and i2 > i1:
+            result = {"type": "hidden_bearish",
+                      "strength": _strength(i2 - i1, min_diff),
+                      "p_x": [p1_idx, p2_idx], "p_y": [p1, p2],
+                      "i_x": [i1_idx, i2_idx], "i_y": [i1, i2]}
+    return result
+
+
+def detect_divergence(price: pd.Series, ind: pd.Series,
+                      lookback: int = 150, order: int = 5,
+                      min_bars: int = 10, min_diff: float = 3.0) -> dict:
+    """
+    Detect the most recent divergence (classic or hidden) between price
+    and indicator within the last `lookback` bars.
+    Priority: classic divergences over hidden divergences.
+    Returns {'type': ..., 'strength': 1|2|3, 'p_x','p_y','i_x','i_y'} or
+            {'type': None, 'strength': 0}.
+    """
+    empty = {"type": None, "strength": 0}
+    try:
+        p   = price.iloc[-lookback:].dropna()
+        ind = ind.iloc[-lookback:].dropna()
+        common = p.index.intersection(ind.index)
+        if len(common) < order * 4:
+            return empty
+        p   = p[common]
+        ind = ind[common]
+
+        ph, pl = _find_swings(p,   order=order)
+        ih, il = _find_swings(ind, order=order)
+
+        # Check classic bearish (highs)
+        r = _check_pair(ph, ih, p, ind, min_bars, min_diff, bullish_direction=False)
+        if r.get("type") in ("bearish",):
+            return r
+
+        # Check classic bullish (lows)
+        r = _check_pair(pl, il, p, ind, min_bars, min_diff, bullish_direction=True)
+        if r.get("type") in ("bullish",):
+            return r
+
+        # Check hidden bearish (highs)
+        r = _check_pair(ph, ih, p, ind, min_bars, min_diff, bullish_direction=False)
+        if r.get("type"):
+            return r
+
+        # Check hidden bullish (lows)
+        r = _check_pair(pl, il, p, ind, min_bars, min_diff, bullish_direction=True)
+        if r.get("type"):
+            return r
+
+    except Exception:
+        pass
+    return empty
+
+
+def compute_divergences(df: pd.DataFrame, ind: dict, interval: str) -> dict:
+    """
+    Compute RSI and MACD histogram divergences.
+    Adapts parameters to timeframe.
+    Returns {'rsi': {...}, 'macd': {...}}
+    """
+    order    = 3 if interval == "1h" else 5
+    min_bars = 5 if interval == "1h" else 10
+    lookback = 100 if interval == "1h" else 150
+
+    rsi      = ind.get("rsi",  pd.Series(dtype=float))
+    macd_h   = ind.get("macd", pd.DataFrame()).get(ind.get("macdh_col",""), pd.Series(dtype=float))
+
+    rsi_min_diff  = 3.0   # RSI points
+    macd_min_diff = float(macd_h.abs().quantile(0.25)) if len(macd_h.dropna()) > 10 else 0.1
+
+    return {
+        "rsi":  detect_divergence(df["close"], rsi,    lookback, order, min_bars, rsi_min_diff),
+        "macd": detect_divergence(df["close"], macd_h, lookback, order, min_bars, macd_min_diff),
+    }
+
+
+def divergence_badge_html(div_result: dict) -> str:
+    """Small coloured badge for screener table."""
+    dtype    = div_result.get("type")
+    strength = div_result.get("strength", 0)
+    label, color = DIV_LABELS.get(dtype, DIV_LABELS[None])
+    dots  = STRENGTH_LABEL.get(strength, "")
+    if dtype is None:
+        return f'<span style="color:#555;font-size:.75rem;">—</span>'
+    bg = color + "22"   # 13% opacity background
+    return (f'<span style="background:{bg};color:{color};border:1px solid {color};'
+            f'border-radius:12px;padding:.15rem .5rem;font-size:.72rem;font-weight:600;">'
+            f'{label} {dots}</span>')
+
+
+def compute_signal(df: pd.DataFrame, p: dict, full_series: bool = False, interval: str = "1d") -> dict:
     empty = {"signal":"N/A","score":0,"details":{},"ind_series":{}}
     if len(df) < 35: return empty
     try:
@@ -430,14 +623,19 @@ def compute_signal(df: pd.DataFrame, p: dict, full_series: bool = False) -> dict
         sw  = _s_willr(willr.iloc[-1])
         total = sr + sm + sc + smo + ss + sw
 
-        return {
-            "signal": _label(total), "score": total,
-            "ind_series": {
+        ind_series_dict = {
                 "macd": macd_df, "rsi": rsi, "mom_pct": mom_pct_series,
                 "cci": cci, "stoch": stoch, "willr": willr,
                 "macd_col": macd_col, "macds_col": macds_col,
                 "macdh_col": macdh_col, "stk_col": stk_col, "std_col": std_col,
-            },
+            }
+        # Divergences need the index (dates) so use d not df for coordinates
+        divs = compute_divergences(d, ind_series_dict, interval) if full_series else {}
+
+        return {
+            "signal": _label(total), "score": total,
+            "ind_series": ind_series_dict,
+            "divergences": divs,
             "details": {
                 "RSI":         (sr,  round(float(rsi.iloc[-1]), 2)),
                 "MACD":        (sm,  round(float(macd_df[macd_col].iloc[-1]), 4)),
@@ -455,17 +653,37 @@ def one_row(full_ticker, name, atype, region, period, interval, p) -> dict:
     base = {"Ticker": full_ticker, "Name": name, "Type": atype, "Region": region,
             "Price": None, "Change%": None, "Signal": "N/A", "Score": 0,
             "RSI": 0, "MACD": 0, "CCI": 0, "Momentum%": 0,
-            "Stochastic": 0, "Williams%R": 0}
+            "Stochastic": 0, "Williams%R": 0,
+            "RSI Div": None, "MACD Div": None}
     df = fetch_data(full_ticker, period, interval)
     if df.empty or len(df) < 35: return base
-    sig   = compute_signal(df, p)
+    sig   = compute_signal(df, p, interval=interval)
     price = float(df["close"].iloc[-1])
     chg   = float((df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100) if len(df) > 1 else 0.0
-    row   = {**base,
-             "Price":   round(price, 4 if price < 10 else 2),
-             "Change%": round(chg, 2),
-             "Signal":  sig["signal"],
-             "Score":   sig["score"]}
+
+    # Compute divergences for screener (no coordinates needed, so reuse tail data)
+    try:
+        d_tail = df.tail(200).copy()
+        mf, ms, mg = p["macd_fast"], p["macd_slow"], p["macd_sig"]
+        rsi_s   = ta.rsi(d_tail["close"], length=p["rsi_len"])
+        macd_s  = ta.macd(d_tail["close"], fast=mf, slow=ms, signal=mg)
+        macdh_s = macd_s[f"MACDh_{mf}_{ms}_{mg}"]
+        min_diff_macd = float(macdh_s.abs().quantile(0.25)) if len(macdh_s.dropna())>10 else 0.1
+        order  = 3 if interval == "1h" else 5
+        min_b  = 5 if interval == "1h" else 10
+        lb     = 100 if interval == "1h" else 150
+        rsi_div  = detect_divergence(d_tail["close"], rsi_s,   lb, order, min_b, 3.0)
+        macd_div = detect_divergence(d_tail["close"], macdh_s, lb, order, min_b, min_diff_macd)
+    except Exception:
+        rsi_div = macd_div = {"type": None, "strength": 0}
+
+    row = {**base,
+           "Price":    round(price, 4 if price < 10 else 2),
+           "Change%":  round(chg, 2),
+           "Signal":   sig["signal"],
+           "Score":    sig["score"],
+           "RSI Div":  rsi_div,
+           "MACD Div": macd_div}
     for k, (sc, _) in sig.get("details", {}).items():
         row[k] = sc
     return row
@@ -475,7 +693,8 @@ def one_row(full_ticker, name, atype, region, period, interval, p) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_charts(df: pd.DataFrame, ind: dict,
-                 ticker: str, name: str, interval: str) -> go.Figure:
+                 ticker: str, name: str, interval: str,
+                 divs: dict = None) -> go.Figure:
     fig = make_subplots(
         rows=7, cols=1, shared_xaxes=True, vertical_spacing=0.022,
         row_heights=[3, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2],
@@ -543,6 +762,69 @@ def build_charts(df: pd.DataFrame, ind: dict,
         line=dict(color="#EC407A", width=1.5), showlegend=False), row=7, col=1)
     for lv, c in [(-20, "rgba(239,83,80,.35)"), (-80, "rgba(38,166,154,.35)")]:
         fig.add_hline(y=lv, line_dash="dash", line_color=c, row=7, col=1)
+
+    # ── Divergence lines ──────────────────────────────────────────────────────
+    # Draw two annotation lines per detected divergence:
+    #   Row 1 (price chart) and the indicator row.
+    # Colors: green = bullish variants, red = bearish variants.
+    if divs:
+        DIV_ROW = {"rsi": 3, "macd": 2}    # subplot row per indicator
+        DIV_COLORS = {
+            "bullish":        "#00C853",
+            "hidden_bullish": "#26A69A",
+            "bearish":        "#D50000",
+            "hidden_bearish": "#FF6D00",
+        }
+        for ind_key, row_num in DIV_ROW.items():
+            d = divs.get(ind_key, {})
+            dtype = d.get("type")
+            if not dtype:
+                continue
+            color  = DIV_COLORS.get(dtype, "#FFD740")
+            px_arr = d.get("p_x", [])
+            py_arr = d.get("p_y", [])
+            ix_arr = d.get("i_x", [])
+            iy_arr = d.get("i_y", [])
+            if len(px_arr) < 2 or len(ix_arr) < 2:
+                continue
+
+            # Price line (row 1)
+            fig.add_shape(type="line",
+                x0=str(px_arr[0]), y0=py_arr[0],
+                x1=str(px_arr[1]), y1=py_arr[1],
+                line=dict(color=color, width=2, dash="dot"),
+                row=1, col=1)
+            # Dot markers at each end on price
+            for xi, yi in zip(px_arr, py_arr):
+                fig.add_scatter(x=[xi], y=[yi], mode="markers",
+                    marker=dict(color=color, size=7, symbol="circle"),
+                    showlegend=False, row=1, col=1)
+
+            # Indicator line (row 2 for MACD, row 3 for RSI)
+            fig.add_shape(type="line",
+                x0=str(ix_arr[0]), y0=iy_arr[0],
+                x1=str(ix_arr[1]), y1=iy_arr[1],
+                line=dict(color=color, width=2, dash="dot"),
+                row=row_num, col=1)
+            for xi, yi in zip(ix_arr, iy_arr):
+                fig.add_scatter(x=[xi], y=[yi], mode="markers",
+                    marker=dict(color=color, size=7, symbol="circle"),
+                    showlegend=False, row=row_num, col=1)
+
+            # Annotation label on price chart
+            strength = d.get("strength", 1)
+            dots  = "●" * strength
+            label = {"bullish":"Bull","bearish":"Bear",
+                     "hidden_bullish":"H.Bull","hidden_bearish":"H.Bear"}.get(dtype,"Div")
+            fig.add_annotation(
+                x=str(px_arr[1]), y=py_arr[1],
+                text=f"<b>{label} {dots}</b>",
+                font=dict(color=color, size=10),
+                bgcolor="rgba(0,0,0,0.6)", bordercolor=color,
+                borderwidth=1, borderpad=3,
+                showarrow=False, yshift=14,
+                row=1, col=1,
+            )
 
     # ── Rangebreaks: remove weekends + overnight gaps ─────────────────────────
     rb_daily  = [dict(bounds=["sat", "mon"])]          # weekends
@@ -728,8 +1010,27 @@ def render_table(df_all: pd.DataFrame):
     st.markdown("<br>", unsafe_allow_html=True)
 
     ind_cols = ["RSI","MACD","CCI","Momentum%","Stochastic","Williams%R"]
+
+    # ── Build display df: convert divergence dicts to readable strings ─────
+    disp_show = disp.copy()
+    for dc in ["RSI Div", "MACD Div"]:
+        if dc in disp_show.columns:
+            def _div_str(cell):
+                if not isinstance(cell, dict): return "—"
+                dtype = cell.get("type")
+                if dtype is None: return "—"
+                s = cell.get("strength", 0)
+                dots = {1:"●", 2:"●●", 3:"●●●"}.get(s,"")
+                short = {"bullish":"▲ Bull","bearish":"▼ Bear",
+                         "hidden_bullish":"▲ H.Bull","hidden_bearish":"▼ H.Bear"}.get(dtype,"—")
+                return f"{short} {dots}"
+            disp_show[dc] = disp_show[dc].apply(_div_str)
+
     show = ["Ticker","Name","Type","Region","Price","Change%",
-            "Signal","Score"] + ind_cols
+            "Signal","Score","RSI Div","MACD Div"] + ind_cols
+
+    # Only keep columns that exist in the dataframe
+    show = [c for c in show if c in disp_show.columns]
 
     def cs(v):
         c = SIG_COLORS.get(v, "")
@@ -742,15 +1043,22 @@ def render_table(df_all: pd.DataFrame):
         if v >= 2:  return "color:#26A69A;font-weight:600;"
         if v <= -2: return "color:#EF5350;font-weight:600;"
         return "color:#FFD740;"
+    def cdiv(v):
+        if not isinstance(v, str): return ""
+        if "Bull" in v: return "color:#00C853;"
+        if "Bear" in v: return "color:#D50000;"
+        return "color:#555555;"
 
-    styled = (disp[show].style
-              .map(cs,  subset=["Signal"])
-              .map(cc,  subset=["Change%"])
-              .map(csc, subset=["Score"])
-              .format({"Price":"{:.2f}","Change%":"{:+.2f}%"}, na_rep="—"))
+    div_cols = [c for c in ["RSI Div","MACD Div"] if c in disp_show.columns]
+    styled_obj = disp_show[show].style.map(cs, subset=["Signal"]).map(cc, subset=["Change%"]).map(csc, subset=["Score"])
+    if div_cols:
+        styled_obj = styled_obj.map(cdiv, subset=div_cols)
+    styled = styled_obj.format({"Price":"{:.2f}","Change%":"{:+.2f}%"}, na_rep="—")
     st.dataframe(styled, use_container_width=True, height=530)
 
-    csv = disp[show].to_csv(index=False)
+    # CSV: convert div dicts to strings for export
+    csv_df = disp_show[show]
+    csv = csv_df.to_csv(index=False)
     st.download_button("⬇ Export CSV", csv,
         f"ta_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
 
@@ -965,7 +1273,7 @@ def page3(p):
         st.error(f"No data for **{full_ticker}**. Try Refresh or check the ticker.")
         return
 
-    sig = compute_signal(df, p, full_series=True)
+    sig = compute_signal(df, p, full_series=True, interval=p["interval"])
     price   = float(df["close"].iloc[-1])
     chg_pct = float((df["close"].iloc[-1]/df["close"].iloc[-2]-1)*100) if len(df)>1 else 0.
     chg_col = "#26A69A" if chg_pct >= 0 else "#EF5350"
@@ -1010,12 +1318,31 @@ def page3(p):
             unsafe_allow_html=True)
         st.progress(int((total+12)/24*100))
 
+        # ── Divergence summary cards ──────────────────────────────────────────
+        divs = sig.get("divergences", {})
+        if divs:
+            st.markdown("<br>**Divergence Detection** (RSI & MACD histogram)", unsafe_allow_html=True)
+            dc1, dc2 = st.columns(2)
+            for col, (key, label) in zip([dc1, dc2], [("rsi","RSI"),("macd","MACD Histogram")]):
+                d = divs.get(key, {"type": None, "strength": 0})
+                dtype    = d.get("type")
+                strength = d.get("strength", 0)
+                disp_lbl, color = DIV_LABELS.get(dtype, DIV_LABELS[None])
+                dots = STRENGTH_LABEL.get(strength, "")
+                with col:
+                    st.markdown(
+                        f'<div class="mc"><div class="lb">{label}</div>'
+                        f'<div class="vl" style="color:{color};font-size:.95rem;">{disp_lbl}</div>'
+                        f'<div class="sb">Strength: {dots if dots else "n/a"}</div></div>',
+                        unsafe_allow_html=True)
+
     st.markdown("<br>", unsafe_allow_html=True)
 
-    ind = sig.get("ind_series", {})
+    ind  = sig.get("ind_series", {})
+    divs = sig.get("divergences", {})
     if ind:
         st.plotly_chart(
-            build_charts(df, ind, full_ticker, name, p["interval"]),
+            build_charts(df, ind, full_ticker, name, p["interval"], divs=divs),
             use_container_width=True, config={"displayModeBar": True},
         )
     else:
